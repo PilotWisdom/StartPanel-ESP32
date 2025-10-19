@@ -1,4 +1,5 @@
 build/
 sdkconfig.*
+.clangd
 .vscode/
 /managed_components
