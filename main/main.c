@@ -10,14 +10,19 @@ static const char *TAG = "joystick";
 
 // Define 16 Joystick output buttons 
 // 1,2,3 - Start (momentary), Magneto_Left (switch), Magneto_Right(switch)
-// 4,5 - !Magneto_Left, !Magneto_Right
-// 6,7,8,9 - Off, Right, Left, Both key position
-// 10-16 - reserved for future use
+// 4,5,6 - Opposite buttons for X-Plane logic
+// 7,8,9,10 - Off, Right, Left, Both key position
+// 11+ - reserved for future use
 #define NUM_BUTTONS 16
+
+//Calculate report size
+#define BUTTON_ARRAY_BYTES ((NUM_BUTTONS + 7) / 8)
+
 // 3 physical pins used: Start, L, R
 #define NUM_PINS 3
+
 const gpio_num_t button_pins[NUM_PINS] = {   
-    GPIO_NUM_1, GPIO_NUM_2, GPIO_NUM_3
+    GPIO_NUM_5, GPIO_NUM_4, GPIO_NUM_3  //Start, L, R
 };
 
 // HID report descriptor for 16-button joystick
@@ -36,6 +41,8 @@ const uint8_t hid_report_descriptor[] = {
     0xC0              // End Collection
 };
 
+#define REPORT_SIZE_BYTES sizeof(hid_report_descriptor)
+
 // String descriptors
 const char* hid_string_descriptor[] = {
     (char[]){0x09, 0x04},  // Language: English
@@ -45,20 +52,19 @@ const char* hid_string_descriptor[] = {
     "16-Button HID Joystick" // HID Interface
 };
 
-//Current and previous physical button state
-bool OldState[NUM_PINS] = {false};
-bool NewState[NUM_PINS] = {false};
-
-uint8_t counter = 0;
-
-uint8_t buttons[2] = {0};  //byte array 2 bites=16bits - used to store buttons state
+//byte array BUTTON_ARRAY_BYTES bites - used to store buttons state
+uint8_t buttons[BUTTON_ARRAY_BYTES], temp2[BUTTON_ARRAY_BYTES] = {0};   
+uint8_t mask[BUTTON_ARRAY_BYTES];
+//Full mask bytes and partial bits part
+uint8_t full_bytes = NUM_PINS / 8;
+uint8_t remaining_bits = NUM_PINS % 8;
 
 
 // Configuration descriptor
 #define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
 static const uint8_t hid_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 2, 10)
+    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, REPORT_SIZE_BYTES, 10)
 };
 
 // HID callbacks
@@ -80,88 +86,122 @@ static void blink(){
     //Todo - add some blinking 
 }
 
+//Update key positions function
+static void update_key_position_buttons(uint8_t *buf, uint8_t left_bit_index, uint8_t right_bit_index, uint8_t base_output_index) {
+    // Extract L and R states
+    uint8_t L = (buf[left_bit_index / 8] >> (left_bit_index % 8)) & 1;
+    uint8_t R = (buf[right_bit_index / 8] >> (right_bit_index % 8)) & 1;
+
+    // Decode key position logic
+    uint8_t Key_Off   = (!L && !R);
+    uint8_t Key_Right = (!L &&  R);
+    uint8_t Key_Left  = ( L && !R);
+    uint8_t Key_Both  = ( L &&  R);
+
+    // Clear output bits
+    for (uint8_t i = 0; i < 4; ++i) {
+        uint8_t bit_index = base_output_index + i;
+        buf[bit_index / 8] &= ~(1 << (bit_index % 8));
+    }
+
+    // Set output bits
+    buf[(base_output_index + 0) / 8] |= Key_Off   << ((base_output_index + 0) % 8);
+    buf[(base_output_index + 1) / 8] |= Key_Right << ((base_output_index + 1) % 8);
+    buf[(base_output_index + 2) / 8] |= Key_Left  << ((base_output_index + 2) % 8);
+    buf[(base_output_index + 3) / 8] |= Key_Both  << ((base_output_index + 3) % 8);
+}
+
+
+//Init first report before the polling loop
+static void init_first_report(void) {
+
+    //Zero out the buttons array
+    memset(buttons, 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
+
+    for (uint8_t i = 0; i < NUM_PINS ; i++) { 
+        if (!gpio_get_level(button_pins[i])) { 
+            buttons[i / 8]            |=  (1 << (i % 8) ); //Actual buttons
+            buttons[(i+NUM_PINS) / 8] &= ~(1 << ((i+NUM_PINS) % 8) ); //Mirror buttons
+        }
+    }
+
+    update_key_position_buttons(buttons,1,2,2*NUM_PINS);
+
+    //Store the same: temp2 = buttons
+    memcpy(temp2,buttons,BUTTON_ARRAY_BYTES);
+
+    //Create the bitmask for physical pins
+    memset(mask, 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
+
+    // Fill full bytes with 0xFF
+    for (uint8_t i = 0; i < full_bytes; i++) {
+        mask[i] = 0xFF;
+    }
+
+    // Set remaining bits in the last byte
+    if (remaining_bits > 0) {
+        mask[full_bytes] = (1 << remaining_bits) - 1;
+    }
+
+    tud_hid_report(0, &buttons, sizeof(buttons));
+}
+
 // Read buttons and send HID report
 static void send_joystick_report(void) {
 
-    //Save pre-existing pins state - debounce logic
-    for (int i = 0; i < NUM_PINS; i++) {
-        OldState[i] = NewState[i];
-    }
+    // array to store transient state
+    static uint8_t buttons_temp[BUTTON_ARRAY_BYTES]; 
+    static uint8_t hasChanged;
+    static bool debounce; // flag for transient state
 
-    //Read 3 physical buttons, Level 0 = ON/true/pressed
-    //Since the pins are configured as pull-up pins
-    bool hasChanged = false;   //has any button changed state?
-
-    //does the HID report needs to be updated??
-    //force update every 255 cycles regardless for keepalive logic
-    counter++;
-    //bool updateDue = (counter % 255) == 0;   
-    bool updateDue = true;
-
-    //temporary variables to hold the calculated value
-    uint8_t oldButtons, newButtons = 0;
-    //checking only first NUM_PINS bits - physical pins state
-    uint8_t mask = (1 << NUM_PINS) - 1;
-    oldButtons = buttons[0] & mask ; 
-
-    for (int i = 0; i < NUM_PINS ; i++) { 
-        if (!gpio_get_level(button_pins[i])) { NewState[i] = true; } 
-        else { NewState[i] = false; }
-        hasChanged = hasChanged || (NewState[i] != OldState[i]);
-    }
-
-    //Saved changes is NewState, exit for debounce - will check next time
-    if (hasChanged) {return; } 
-
-    //Button states are the same, 
-    //Check if stored joystick button state is consistent with physical state
-    //Assuming NUM_PINS <=8
-    for (int i = 0; i < NUM_PINS ; i++) {  
-        if (NewState[i]){ 
-            //initially [bite]0, fill in the pressed buttons
-            newButtons |= (1 << (i % 8));
+    //checking first NUM_PINS bits - physical pins state, store in buttons_temp
+    for (uint8_t i = 0; i < NUM_PINS ; i++) { 
+        if (!gpio_get_level(button_pins[i])) {   //Pin is ON
+            buttons_temp[i / 8] |= (1 << (i % 8) ) ;    //Set the corresponding bit
+            buttons_temp[(i+NUM_PINS) / 8] &= ~(1 << ((i+NUM_PINS) % 8)); //Clear the mirror bit
+        } else {   //Pin is OFF
+            buttons_temp[i / 8] &= ~(1 << (i % 8) ) ;    //Clear the corresponding bit
+            buttons_temp[(i+NUM_PINS) / 8] |= (1 << ((i+NUM_PINS) % 8)); //Set the mirror pin
         }
     }
 
-    //if button state hasn't changed and no updates due - exit
-    if (!updateDue && (newButtons == oldButtons)) {return;}
-        
-    //Fill in the rest of the new state - update is due, need to fill the report
-    //Joystick buttons 4,5 = not (buttons 2,3) 
-    if (NewState[1]) {buttons[0] &= ~(1 << 3);} else {buttons[0] |= 1 << 3;} //!L
-    if (NewState[2]) {buttons[0] &= ~(1 << 4);} else {buttons[0] |= 1 << 4;} //!R
-   
-    //Joystick buttons 6,7,8,9: OFF, R, L, Both
-    //OFF - none pressed
-    if (!(NewState[0] || NewState[1] || NewState[2])) {buttons[0] |= 1 << 5;}
-    else {buttons[0] &= ~(1 << 5);}
+    //Recalculate key position bits
+    update_key_position_buttons(buttons_temp,1,2,2*NUM_PINS);
 
-    // R = !Start & !L & R
-    if (!NewState[0] && !NewState[1] && NewState[2]) {buttons[0] |= 1 << 6;}
-    else {buttons[0] &= ~(1 << 6);}
+    //uint8_t full_bytes = NUM_PINS / 8;  - defined already
+    //Checking if anything has changed
+    hasChanged = 0;
+    for (uint8_t i = 0; i < full_bytes; i++) {  //buttons only, no need to mask
+        hasChanged |= ( buttons_temp[i] ^ temp2[i] ); //XOR produces all zeroes if no changes
+    }
+    //uint8_t remaining_bits = NUM_PINS % 8; - defined already
+    hasChanged |= ( buttons_temp[full_bytes] ^ (temp2[full_bytes] & mask[full_bytes] )  ); 
 
-    // L = !Start & !R & L
-    if (!NewState[0] && NewState[1] && !NewState[2]) {buttons[0] |= 1 << 7;}
-    else {buttons[0] &= ~(1 << 7);}
+    if (hasChanged != 0) { //Some pins state have changed comparing to temp state
+        debounce = true;
+        //Store the new state in a temporary array
+        memcpy(temp2,buttons_temp,BUTTON_ARRAY_BYTES);
+    } 
+    else if (debounce) {   //debounce triggered - need to recalculate and update the report
+        //reset the debounce flag
+        debounce = false;
 
-    // Both = !Start & R & L
-    if (!NewState[0] && NewState[1] && NewState[2]) {buttons[1] |= 1 << 0;}
-    else {buttons[1] &= ~(1 << 0);}
+        //update the state into permanent variable
+        memcpy(buttons,temp2,BUTTON_ARRAY_BYTES);
+    }
 
-    /*
-    for (int i = 0; i < 32; i++) {
-        if (!gpio_get_level(button_pins[i])) {
-            buttons[i / 8] |= (1 << (i % 8));
-        }
-    }    
-    */
+    //Skip debounce for now
+    memcpy(buttons,buttons_temp,BUTTON_ARRAY_BYTES);
+
     tud_hid_report(0, &buttons, sizeof(buttons));
+    blink();
+
 }
 
 // Main app
 void app_main(void) {
     // Configure button GPIOs
-    for (int i = 0; i < NUM_PINS; i++) {
+    for (uint8_t i = 0; i < NUM_PINS; i++) {
         gpio_config_t cfg = {
             .pin_bit_mask = BIT64(button_pins[i]),
             .mode = GPIO_MODE_INPUT,
@@ -189,6 +229,9 @@ void app_main(void) {
     };
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "USB HID ready");
+
+    //Init the joystick state
+    init_first_report();
 
     // Main loop
     while (1) {
