@@ -53,12 +53,15 @@ const char* hid_string_descriptor[] = {
 };
 
 //byte array BUTTON_ARRAY_BYTES bites - used to store buttons state
-uint8_t buttons[BUTTON_ARRAY_BYTES], temp2[BUTTON_ARRAY_BYTES] = {0};   
-uint8_t mask[BUTTON_ARRAY_BYTES];
+static uint8_t buttons[BUTTON_ARRAY_BYTES], temp2[BUTTON_ARRAY_BYTES], mask[BUTTON_ARRAY_BYTES];
 //Full mask bytes and partial bits part
 uint8_t full_bytes = NUM_PINS / 8;
 uint8_t remaining_bits = NUM_PINS % 8;
 
+//debounce logic
+//static uint8_t debounce_counter = 0;
+//static bool debounce_active = false;
+#define DEBOUNCE_THRESHOLD 3  // Number of stable cycles required
 
 // Configuration descriptor
 #define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
@@ -111,6 +114,16 @@ static void update_key_position_buttons(uint8_t *buf, uint8_t left_bit_index, ui
     buf[(base_output_index + 3) / 8] |= Key_Both  << ((base_output_index + 3) % 8);
 }
 
+static void swap_last_button(void) {
+    buttons[BUTTON_ARRAY_BYTES-1] ^= (1 << 7);
+    tud_hid_report(0, &buttons, sizeof(buttons));
+}
+
+static void swap_another_button(void) {
+    buttons[BUTTON_ARRAY_BYTES-1] ^= (1 << 6);
+    tud_hid_report(0, &buttons, sizeof(buttons));
+}
+
 
 //Init first report before the polling loop
 static void init_first_report(void) {
@@ -151,8 +164,10 @@ static void send_joystick_report(void) {
 
     // array to store transient state
     static uint8_t buttons_temp[BUTTON_ARRAY_BYTES]; 
-    static uint8_t hasChanged;
-    static bool debounce; // flag for transient state
+    static uint8_t hasChanged=0;
+
+    //clear the temp array
+    memset(buttons_temp, 0, BUTTON_ARRAY_BYTES);
 
     //checking first NUM_PINS bits - physical pins state, store in buttons_temp
     for (uint8_t i = 0; i < NUM_PINS ; i++) { 
@@ -170,31 +185,18 @@ static void send_joystick_report(void) {
 
     //uint8_t full_bytes = NUM_PINS / 8;  - defined already
     //Checking if anything has changed
-    hasChanged = 0;
     for (uint8_t i = 0; i < full_bytes; i++) {  //buttons only, no need to mask
         hasChanged |= ( buttons_temp[i] ^ temp2[i] ); //XOR produces all zeroes if no changes
     }
     //uint8_t remaining_bits = NUM_PINS % 8; - defined already
-    hasChanged |= ( buttons_temp[full_bytes] ^ (temp2[full_bytes] & mask[full_bytes] )  ); 
-
-    if (hasChanged != 0) { //Some pins state have changed comparing to temp state
-        debounce = true;
-        //Store the new state in a temporary array
-        memcpy(temp2,buttons_temp,BUTTON_ARRAY_BYTES);
-    } 
-    else if (debounce) {   //debounce triggered - need to recalculate and update the report
-        //reset the debounce flag
-        debounce = false;
-
-        //update the state into permanent variable
-        memcpy(buttons,temp2,BUTTON_ARRAY_BYTES);
-    }
+    hasChanged |= ( buttons_temp[full_bytes] ^ ( temp2[full_bytes] & mask[full_bytes] )  ); 
 
     //Skip debounce for now
     memcpy(buttons,buttons_temp,BUTTON_ARRAY_BYTES);
-
     tud_hid_report(0, &buttons, sizeof(buttons));
+
     blink();
+
 
 }
 
