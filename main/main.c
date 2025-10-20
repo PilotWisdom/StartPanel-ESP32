@@ -52,16 +52,18 @@ const char* hid_string_descriptor[] = {
     "16-Button HID Joystick" // HID Interface
 };
 
-//byte array BUTTON_ARRAY_BYTES bites - used to store buttons state
-static uint8_t buttons[BUTTON_ARRAY_BYTES], temp2[BUTTON_ARRAY_BYTES], mask[BUTTON_ARRAY_BYTES];
-//Full mask bytes and partial bits part
-uint8_t full_bytes = NUM_PINS / 8;
-uint8_t remaining_bits = NUM_PINS % 8;
-
 //debounce logic
 //static uint8_t debounce_counter = 0;
 //static bool debounce_active = false;
 #define DEBOUNCE_THRESHOLD 3  // Number of stable cycles required
+
+//byte array BUTTON_ARRAY_BYTES bites - used to store buttons state
+static uint8_t buttons[BUTTON_ARRAY_BYTES],  mask[BUTTON_ARRAY_BYTES];
+//static uint8_t temp2[BUTTON_ARRAY_BYTES];
+static uint8_t staging_area[DEBOUNCE_THRESHOLD][BUTTON_ARRAY_BYTES]; //array to store transient data
+//Full mask bytes and partial bits part
+uint8_t full_bytes = NUM_PINS / 8;
+uint8_t remaining_bits = NUM_PINS % 8;
 
 // Configuration descriptor
 #define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
@@ -114,6 +116,43 @@ static void update_key_position_buttons(uint8_t *buf, uint8_t left_bit_index, ui
     buf[(base_output_index + 3) / 8] |= Key_Both  << ((base_output_index + 3) % 8);
 }
 
+//read staged states, update stable positions into permanent array
+static void update_button_states_from_stage(){  
+
+    uint8_t stable_mask[BUTTON_ARRAY_BYTES];  // Bits that are stable across all samples
+
+    //find out only unchanged values throughout the DEBOUNCE_THRESHOLD number of reports
+    // Start with all bits assumed stable
+    for (uint8_t byte = 0; byte < BUTTON_ARRAY_BYTES; byte++) {
+        stable_mask[byte] = 0xFF;
+
+        for (uint8_t sample = 1; sample < DEBOUNCE_THRESHOLD; sample++) {
+            // XOR with reference, then invert to get equality mask
+            uint8_t diff = staging_area[0][byte] ^ staging_area[sample][byte];
+            stable_mask[byte] &= ~diff;  // Clear bits that differ
+        }
+    }
+
+    uint8_t stable_values[BUTTON_ARRAY_BYTES];   //Stable bits across the samples
+    for (uint8_t i = 0; i < BUTTON_ARRAY_BYTES; i++) {
+        stable_values[i] = staging_area[0][i] & stable_mask[i];
+        // Clear stable bits in buttons, then OR in stable values
+        buttons[i] = (buttons[i] & ~stable_mask[i]) | (stable_values[i] & stable_mask[i]);        
+    }
+
+    //Recalculate key position bits
+    update_key_position_buttons(buttons,1,2,2*NUM_PINS);
+
+}
+
+static void push_to_staging_area(uint8_t *buf) {   //Stage the changes to 
+    for (uint8_t i = DEBOUNCE_THRESHOLD-1; i > 0; i-- ){ // push old values up
+        //staging_area[]
+        memcpy(staging_area[i],staging_area[i-1],BUTTON_ARRAY_BYTES);
+    }
+    memcpy(staging_area[0], buf, BUTTON_ARRAY_BYTES); //fill in the fresh report
+}
+
 static void swap_last_button(void) {
     buttons[BUTTON_ARRAY_BYTES-1] ^= (1 << 7);
     tud_hid_report(0, &buttons, sizeof(buttons));
@@ -141,7 +180,7 @@ static void init_first_report(void) {
     update_key_position_buttons(buttons,1,2,2*NUM_PINS);
 
     //Store the same: temp2 = buttons
-    memcpy(temp2,buttons,BUTTON_ARRAY_BYTES);
+    //memcpy(temp2,buttons,BUTTON_ARRAY_BYTES);
 
     //Create the bitmask for physical pins
     memset(mask, 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
@@ -156,6 +195,11 @@ static void init_first_report(void) {
         mask[full_bytes] = (1 << remaining_bits) - 1;
     }
 
+    //Ensure clear state for the staging area
+    for (uint8_t i=0; i< DEBOUNCE_THRESHOLD; i++){
+        memset(staging_area[i], 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
+    }
+
     tud_hid_report(0, &buttons, sizeof(buttons));
 }
 
@@ -164,12 +208,11 @@ static void send_joystick_report(void) {
 
     // array to store transient state
     static uint8_t buttons_temp[BUTTON_ARRAY_BYTES]; 
-    static uint8_t hasChanged=0;
 
     //clear the temp array
     memset(buttons_temp, 0, BUTTON_ARRAY_BYTES);
 
-    //checking first NUM_PINS bits - physical pins state, store in buttons_temp
+    //checking first NUM_PINS bits - physical pins state, store in buttons_temp and caclulate opposites
     for (uint8_t i = 0; i < NUM_PINS ; i++) { 
         if (!gpio_get_level(button_pins[i])) {   //Pin is ON
             buttons_temp[i / 8] |= (1 << (i % 8) ) ;    //Set the corresponding bit
@@ -180,23 +223,18 @@ static void send_joystick_report(void) {
         }
     }
 
-    //Recalculate key position bits
-    update_key_position_buttons(buttons_temp,1,2,2*NUM_PINS);
+    //push the changes into staging arrea
+    push_to_staging_area(buttons_temp);
 
-    //uint8_t full_bytes = NUM_PINS / 8;  - defined already
-    //Checking if anything has changed
-    for (uint8_t i = 0; i < full_bytes; i++) {  //buttons only, no need to mask
-        hasChanged |= ( buttons_temp[i] ^ temp2[i] ); //XOR produces all zeroes if no changes
-    }
-    //uint8_t remaining_bits = NUM_PINS % 8; - defined already
-    hasChanged |= ( buttons_temp[full_bytes] ^ ( temp2[full_bytes] & mask[full_bytes] )  ); 
+    //calculate the correct final state
+    update_button_states_from_stage();
 
-    //Skip debounce for now
-    memcpy(buttons,buttons_temp,BUTTON_ARRAY_BYTES);
+    //Uncomment to ignore staging
+    //memcpy(buttons,buttons_temp,BUTTON_ARRAY_BYTES);
+
     tud_hid_report(0, &buttons, sizeof(buttons));
 
     blink();
-
 
 }
 
