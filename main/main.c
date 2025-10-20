@@ -172,16 +172,6 @@ static void push_to_staging_area(uint8_t *buf) {   //Stage the changes to
     memcpy(staging_area[0], buf, BUTTON_ARRAY_BYTES); //fill in the fresh report
 }
 
-static void swap_last_button(void) {
-    buttons[BUTTON_ARRAY_BYTES-1] ^= (1 << 7);
-    tud_hid_report(0, &buttons, sizeof(buttons));
-}
-
-static void swap_another_button(void) {
-    buttons[BUTTON_ARRAY_BYTES-1] ^= (1 << 6);
-    tud_hid_report(0, &buttons, sizeof(buttons));
-}
-
 //Init first report before the polling loop
 static void init_first_report(void) {
 
@@ -196,9 +186,6 @@ static void init_first_report(void) {
     }
 
     update_key_position_buttons(buttons,1,2,2*NUM_PINS);
-
-    //Store the same: temp2 = buttons
-    //memcpy(temp2,buttons,BUTTON_ARRAY_BYTES);
 
     //Create the bitmask for physical pins
     memset(mask, 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
