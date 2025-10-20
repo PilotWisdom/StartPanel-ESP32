@@ -53,14 +53,16 @@ const char* hid_string_descriptor[] = {
 };
 
 //debounce logic
-//static uint8_t debounce_counter = 0;
 //static bool debounce_active = false;
 #define DEBOUNCE_THRESHOLD 3  // Number of stable cycles required
+#define HEARTBEAT_DIVIDER 128 // Heartbeat divider for sending reports
 
 //byte array BUTTON_ARRAY_BYTES bites - used to store buttons state
 static uint8_t buttons[BUTTON_ARRAY_BYTES],  mask[BUTTON_ARRAY_BYTES];
-//static uint8_t temp2[BUTTON_ARRAY_BYTES];
+static uint8_t  staged[BUTTON_ARRAY_BYTES]; //Staged changes ready to apply
 static uint8_t staging_area[DEBOUNCE_THRESHOLD][BUTTON_ARRAY_BYTES]; //array to store transient data
+static bool report_changed = false;
+static uint8_t update_counter = 0;
 //Full mask bytes and partial bits part
 uint8_t full_bytes = NUM_PINS / 8;
 uint8_t remaining_bits = NUM_PINS % 8;
@@ -89,6 +91,14 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 //Blink LED briefly to visually confirm reporting
 static void blink(){
     //Todo - add some blinking 
+}
+
+static void detect_input_change(){ //compare buttons and staged
+    uint8_t result = 0;
+    for (uint8_t i = 0; i < BUTTON_ARRAY_BYTES; i++) {
+        result |= buttons[i] ^ staged[i];
+    }
+    report_changed = (bool) result;
 }
 
 //Update key positions function
@@ -134,15 +144,24 @@ static void update_button_states_from_stage(){
     }
 
     uint8_t stable_values[BUTTON_ARRAY_BYTES];   //Stable bits across the samples
+
+    //Fill in the staged buffer with complete data
+    memcpy(staged, buttons,  BUTTON_ARRAY_BYTES); //copy current state over to staging area
     for (uint8_t i = 0; i < BUTTON_ARRAY_BYTES; i++) {
         stable_values[i] = staging_area[0][i] & stable_mask[i];
-        // Clear stable bits in buttons, then OR in stable values
-        buttons[i] = (buttons[i] & ~stable_mask[i]) | (stable_values[i] & stable_mask[i]);        
+        // Clear stable bits in staged, then OR in stable values
+        staged[i] = (staged[i] & ~stable_mask[i]) | (stable_values[i] & stable_mask[i]);        
     }
 
     //Recalculate key position bits
-    update_key_position_buttons(buttons,1,2,2*NUM_PINS);
+    update_key_position_buttons(staged,1,2,2*NUM_PINS);
 
+    //Detect changes and set the flag if anything changed
+    detect_input_change();
+
+    //Get the report ready to send
+    memcpy(buttons,staged,BUTTON_ARRAY_BYTES);
+    
 }
 
 static void push_to_staging_area(uint8_t *buf) {   //Stage the changes to 
@@ -162,7 +181,6 @@ static void swap_another_button(void) {
     buttons[BUTTON_ARRAY_BYTES-1] ^= (1 << 6);
     tud_hid_report(0, &buttons, sizeof(buttons));
 }
-
 
 //Init first report before the polling loop
 static void init_first_report(void) {
@@ -208,6 +226,7 @@ static void send_joystick_report(void) {
 
     // array to store transient state
     static uint8_t buttons_temp[BUTTON_ARRAY_BYTES]; 
+    static bool update_due=true;
 
     //clear the temp array
     memset(buttons_temp, 0, BUTTON_ARRAY_BYTES);
@@ -231,8 +250,11 @@ static void send_joystick_report(void) {
 
     //Uncomment to ignore staging
     //memcpy(buttons,buttons_temp,BUTTON_ARRAY_BYTES);
+    // Send heartbeat every HEARTBEAT_DIVIDER times irrelevant of the changes
+    update_due = ( (update_counter % HEARTBEAT_DIVIDER) == 0);
+    update_counter++;
 
-    tud_hid_report(0, &buttons, sizeof(buttons));
+    if (report_changed || update_due) { tud_hid_report(0, &buttons, sizeof(buttons)); }
 
     blink();
 
