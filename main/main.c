@@ -21,9 +21,12 @@ static const char *TAG = "joystick";
 // 3 physical pins used: Start, L, R
 #define NUM_PINS 3
 
+// !!! Avoid GPIO3 for rocker switches!!!
 const gpio_num_t button_pins[NUM_PINS] = {   
-    GPIO_NUM_5, GPIO_NUM_4, GPIO_NUM_3  //Start, L, R
+    GPIO_NUM_5, GPIO_NUM_4, GPIO_NUM_2  //Start, L, R
 };
+// Starter switch  LED light
+#define LED_PIN GPIO_NUM_6
 
 // HID report descriptor for 16-button joystick
 const uint8_t hid_report_descriptor[] = {
@@ -64,8 +67,10 @@ static uint8_t staging_area[DEBOUNCE_THRESHOLD][BUTTON_ARRAY_BYTES]; //array to 
 static bool report_changed = false;
 static uint8_t update_counter = 0;
 //Full mask bytes and partial bits part
-uint8_t full_bytes = NUM_PINS / 8;
-uint8_t remaining_bits = NUM_PINS % 8;
+static uint8_t full_bytes = NUM_PINS / 8;
+static uint8_t remaining_bits = NUM_PINS % 8;
+static uint8_t ledStatus=0;
+
 
 // Configuration descriptor
 #define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
@@ -93,6 +98,13 @@ static void blink(){
     //Todo - add some blinking 
 }
 
+// LED control - Sink mode, reverse logic
+static void led_set() {
+    //Check buttons 2 and 3 state
+    ledStatus = buttons[0] & 0b00000110; 
+    gpio_set_level(LED_PIN, (bool) ledStatus ? 0 : 1);
+}
+
 static void detect_input_change(){ //compare buttons and staged
     uint8_t result = 0;
     for (uint8_t i = 0; i < BUTTON_ARRAY_BYTES; i++) {
@@ -112,6 +124,8 @@ static void update_key_position_buttons(uint8_t *buf, uint8_t left_bit_index, ui
     uint8_t Key_Right = (!L &&  R);
     uint8_t Key_Left  = ( L && !R);
     uint8_t Key_Both  = ( L &&  R);
+
+    // Set LED status
 
     // Clear output bits
     for (uint8_t i = 0; i < 4; ++i) {
@@ -187,6 +201,9 @@ static void init_first_report(void) {
 
     update_key_position_buttons(buttons,1,2,2*NUM_PINS);
 
+    //set LED status based on buttons 1 and 2
+    led_set();
+
     //Create the bitmask for physical pins
     memset(mask, 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
 
@@ -260,6 +277,17 @@ void app_main(void) {
         };
         gpio_config(&cfg);
     }
+
+    // Configure LED GPIO
+    gpio_config_t led_cfg = {
+        .pin_bit_mask = BIT64(LED_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = false,
+        .pull_down_en = false,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&led_cfg);
+
 
     // Initialize USB
     ESP_LOGI(TAG, "Initializing USB HID");
