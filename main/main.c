@@ -23,10 +23,10 @@ static const char *TAG = "joystick";
 
 // !!! Avoid GPIO3 for rocker switches!!!
 const gpio_num_t button_pins[NUM_PINS] = {   
-    GPIO_NUM_5, GPIO_NUM_4, GPIO_NUM_2  //Start, L, R
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5  //Start, L, R
 };
 // Starter switch  LED light
-#define LED_PIN GPIO_NUM_6
+#define LED_PIN GPIO_NUM_1
 
 // HID report descriptor for 16-button joystick
 const uint8_t hid_report_descriptor[] = {
@@ -101,9 +101,11 @@ static void blink(){
 // LED control - Sink mode, reverse logic
 static void led_set() {
     //Check buttons 2 and 3 state
-    ledStatus = buttons[0] & 0b00000110; 
-    gpio_set_level(LED_PIN, (bool) ledStatus ? 0 : 1);
+    ledStatus = buttons[0] & 0b00000110;
+    gpio_set_level(LED_PIN, (bool)ledStatus ? 0 : 1);
+
 }
+
 
 static void detect_input_change(){ //compare buttons and staged
     uint8_t result = 0;
@@ -199,10 +201,10 @@ static void init_first_report(void) {
         }
     }
 
-    update_key_position_buttons(buttons,1,2,2*NUM_PINS);
-
     //set LED status based on buttons 1 and 2
     led_set();
+
+    update_key_position_buttons(buttons,1,2,2*NUM_PINS);
 
     //Create the bitmask for physical pins
     memset(mask, 0, BUTTON_ARRAY_BYTES);  // Clear all bytes
@@ -258,7 +260,11 @@ static void send_joystick_report(void) {
     update_due = ( (update_counter % HEARTBEAT_DIVIDER) == 0);
     update_counter++;
 
-    if (report_changed || update_due) { tud_hid_report(0, &buttons, sizeof(buttons)); }
+    if (report_changed || update_due) { 
+        tud_hid_report(0, &buttons, sizeof(buttons)); 
+        //set LED status based on buttons 1 and 2
+        led_set();
+    }
 
     blink();
 
