@@ -5,6 +5,12 @@
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "driver/gpio.h"
+#include "../serial_auto.h"
+
+#ifndef AUTO_SERIAL
+#define AUTO_SERIAL "PWSTR00005"
+#endif
+
 
 static const char *TAG = "joystick";
 
@@ -21,12 +27,12 @@ static const char *TAG = "joystick";
 // 3 physical pins used: Start, L, R
 #define NUM_PINS 3
 
-// !!! Avoid GPIO3 for rocker switches!!!
+// Connected switches/rockers
 const gpio_num_t button_pins[NUM_PINS] = {   
-    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5  //Start, L, R
+    GPIO_NUM_3, GPIO_NUM_2, GPIO_NUM_1  //Start, L, R
 };
 // Starter switch  LED light
-#define LED_PIN GPIO_NUM_1
+#define LED_PIN GPIO_NUM_4
 
 // HID report descriptor for 16-button joystick
 const uint8_t hid_report_descriptor[] = {
@@ -51,7 +57,7 @@ const char* hid_string_descriptor[] = {
     (char[]){0x09, 0x04},  // Language: English
     "PilotWisdom",         // Manufacturer
     "PilotWisdom StartPanel",  // Product
-    "PWESP001",            // Serial
+    AUTO_SERIAL,            // Serial - starter
     "16-Button HID Joystick" // HID Interface
 };
 
@@ -91,6 +97,10 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                            hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+}
+
+const char *tusb_desc_string_serial(void) {
+    return AUTO_SERIAL;
 }
 
 //Blink LED briefly to visually confirm reporting
