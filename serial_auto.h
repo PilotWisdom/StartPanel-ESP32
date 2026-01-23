@@ -1,1 +1,0 @@
-#define AUTO_SERIAL "PWSTR00006"

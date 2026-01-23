@@ -5,7 +5,12 @@
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "driver/gpio.h"
-#include "../serial_auto.h"
+#include "serial_auto.h"
+
+#include "driver/rmt_tx.h" 
+#include "esp_log.h" 
+#include "esp_check.h"
+#include "esp_random.h"
 
 #ifndef AUTO_SERIAL
 #define AUTO_SERIAL "PWSTR00005"
@@ -29,10 +34,22 @@ static const char *TAG = "joystick";
 
 // Connected switches/rockers
 const gpio_num_t button_pins[NUM_PINS] = {   
-    GPIO_NUM_3, GPIO_NUM_2, GPIO_NUM_1  //Start, L, R
+    GPIO_NUM_2, GPIO_NUM_3, GPIO_NUM_4  //Start, L, R
 };
 // Starter switch  LED light
-#define LED_PIN GPIO_NUM_4
+#define LED_PIN GPIO_NUM_1
+
+// WS2812 built-in addressable LED
+#define LED_GPIO 21 
+#define LED_COUNT 1
+// WS2812 timing (ns) 
+#define T0H 350 
+#define T0L 800 
+#define T1H 700 
+#define T1L 600 
+#define RES 50000 // reset >50us
+static rmt_channel_handle_t led_chan = NULL; 
+static rmt_encoder_handle_t led_encoder = NULL;
 
 // HID report descriptor for 16-button joystick
 const uint8_t hid_report_descriptor[] = {
@@ -76,6 +93,7 @@ static uint8_t update_counter = 0;
 static uint8_t full_bytes = NUM_PINS / 8;
 static uint8_t remaining_bits = NUM_PINS % 8;
 static uint8_t ledStatus=0;
+static bool enable_led = true; //control built-in LED
 
 
 // Configuration descriptor
@@ -103,9 +121,58 @@ const char *tusb_desc_string_serial(void) {
     return AUTO_SERIAL;
 }
 
+//WS2812 control
+static void ws2812_init(void)
+{
+    rmt_tx_channel_config_t chan_cfg = {
+        .gpio_num = LED_GPIO,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .mem_block_symbols = 64,
+        .resolution_hz = 10 * 1000 * 1000, // 10 MHz → 100 ns ticks
+        .trans_queue_depth = 4,
+    };
+
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&chan_cfg, &led_chan));
+
+    rmt_bytes_encoder_config_t bytes_cfg = {
+        .bit0 = {
+            .duration0 = T0H / 100, .level0 = 1,
+            .duration1 = T0L / 100, .level1 = 0,
+        },
+        .bit1 = {
+            .duration0 = T1H / 100, .level0 = 1,
+            .duration1 = T1L / 100, .level1 = 0,
+        },
+        .flags.msb_first = 1,
+    };
+
+    ESP_ERROR_CHECK(rmt_new_bytes_encoder(&bytes_cfg, &led_encoder));
+    ESP_ERROR_CHECK(rmt_enable(led_chan));
+}
+
+static void ws2812_set_rgb(uint8_t r, uint8_t g, uint8_t b)
+{
+    uint8_t buf[3] = { g, r, b }; // WS2812 uses GRB order
+
+    rmt_transmit_config_t tx_cfg = {
+        .loop_count = 0,
+    };
+
+    ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, buf, sizeof(buf), &tx_cfg));
+    ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
+}
+
 //Blink LED briefly to visually confirm reporting
 static void blink(){
-    //Todo - add some blinking 
+
+    uint32_t rnd = esp_random();
+    uint8_t r = (rnd >> 0) & 0x3F;
+    uint8_t g = (rnd >> 8) & 0x3F;
+    uint8_t b = (rnd >> 16) & 0x3F;
+    //set random color
+    if (enable_led) { ws2812_set_rgb(r, g, b); } 
+    else { ws2812_set_rgb(0, 0, 0); }
+    enable_led = !enable_led;
 }
 
 // LED control - Sink mode, reverse logic
@@ -274,9 +341,9 @@ static void send_joystick_report(void) {
         tud_hid_report(0, &buttons, sizeof(buttons)); 
         //set LED status based on buttons 1 and 2
         led_set();
+        blink();
     }
 
-    blink();
 
 }
 
@@ -304,7 +371,6 @@ void app_main(void) {
     };
     gpio_config(&led_cfg);
 
-
     // Initialize USB
     ESP_LOGI(TAG, "Initializing USB HID");
     const tinyusb_config_t tusb_cfg = {
@@ -323,6 +389,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "USB HID ready");
 
+    ws2812_init();
+
     //Init the joystick state
     init_first_report();
 
@@ -331,6 +399,6 @@ void app_main(void) {
         if (tud_hid_ready()) {
             send_joystick_report();
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(25));
     }
 }
