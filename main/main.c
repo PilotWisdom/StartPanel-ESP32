@@ -67,7 +67,7 @@ const uint8_t hid_report_descriptor[] = {
     0xC0              // End Collection
 };
 
-#define REPORT_SIZE_BYTES sizeof(hid_report_descriptor)
+#define REPORT_SIZE_BYTES sizeof(buttons)
 
 // String descriptors
 const char* hid_string_descriptor[] = {
